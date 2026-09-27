@@ -28,27 +28,13 @@ if (!ADMIN_PASSWORD || !JWT_SECRET) {
   process.exit(1);
 }
 
-// Middleware - CORS Configured for Vercel
-const frontendOrigin = String(process.env.FRONTEND_URL || 'https://collegeresult.vercel.app').replace(/\/+$/, '');
-const allowedOrigins = [
-  frontendOrigin,
-  'http://localhost:5173',
-  'http://localhost:3000'
-];
-
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      return callback(null, true);
-    } else {
-      return callback(new Error('CORS policy violation: Access denied'));
-    }
-  },
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+app.options('*', cors());
 
 app.use(express.json());
 
