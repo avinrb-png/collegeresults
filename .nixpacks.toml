@@ -1,9 +1,0 @@
-[phases.build]
-cmds = ["cd collegeresultportal && npm install", "cd collegeresultportal && npm run build"]
-
-[phases.start]
-cmds = ["node collegeresultportal/server.js"]
-
-[variables]
-NODE_ENV = "production"
-PORT = "3000"

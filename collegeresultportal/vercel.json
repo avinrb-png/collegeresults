@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://collegeresult.onrender.com/api/:path*"
-    }
-  ]
-}
