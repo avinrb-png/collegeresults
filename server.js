@@ -11,6 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim();
 const SUPABASE_KEY = String(process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || '').trim();
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('ERROR: SUPABASE_URL and SUPABASE_ANON_KEY are required.');
@@ -19,6 +20,9 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const supabaseAdmin = SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+  : null;
 
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || '').trim();
 const JWT_SECRET = String(process.env.JWT_SECRET || '').trim();
@@ -85,6 +89,9 @@ app.post('/api/admin/login', (req, res) => {
 app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'SUPABASE_SERVICE_ROLE_KEY is required for result uploads' });
+    }
 
     const batchLabels = {
       '1st_puc_science': '1st PUC',
@@ -93,6 +100,15 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
     const selectedBatch = String(req.body.batch || '').trim();
     const classGrade = batchLabels[selectedBatch];
     if (!classGrade) return res.status(400).json({ error: 'Please select a valid PUC batch' });
+    const examType = String(req.body.exam_type || 'monthly').trim().toLowerCase();
+    if (!['monthly', 'yearly'].includes(examType)) {
+      return res.status(400).json({ error: 'Please select a valid exam type' });
+    }
+
+    const totalMaxMarks = examType === 'yearly' ? 450 : 225;
+    const subjectMaxMarks = examType === 'yearly'
+      ? { English: 80, Kannada: 80, Mathematics: 80, Physics: 70, Chemistry: 70, 'Computer Science': 70, Biology: 70 }
+      : { English: 40, Kannada: 40, Mathematics: 40, Physics: 35, Chemistry: 35, 'Computer Science': 35, Biology: 35 };
 
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
@@ -103,7 +119,7 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
 
     const nonSubjectKeys = new Set([
       'rollno', 'rollnumber', 'name', 'studentname', 'class', 'classgrade', 'stream', 'combination', 'totalmarks',
-      'maxmarks', 'percentage', 'collegerank', 'streamrank'
+      'maxmarks', 'totalmaxmarks', 'examtype', 'percentage', 'collegerank', 'streamrank'
     ]);
 
     const subjectKeyMap = {
@@ -133,7 +149,7 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
         .trim();
     }
 
-    const parsedRows = rows.map((row) => {
+    let parsedRows = rows.map((row) => {
       const rollNo = String(getRowValue(row, ['Roll No', 'RollNo', 'roll_no', 'rollno', 'roll number']) || '').trim().toUpperCase();
       const name = String(getRowValue(row, ['Name', 'name', 'Student Name', 'studentname']) || '').trim();
       const stream = 'Science';
@@ -142,7 +158,16 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
 
       if (!rollNo || !name) return null;
 
+      const normalizedCombination = combination.toUpperCase().replace(/[^A-Z]/g, '');
+      const activeSubjects = normalizedCombination.includes('PCMB') || normalizedCombination.includes('BIOLOGY')
+        ? ['Kannada', 'English', 'Mathematics', 'Physics', 'Chemistry', 'Biology']
+        : normalizedCombination.includes('PCMC') || normalizedCombination.includes('COMPUTER')
+          ? ['Kannada', 'English', 'Mathematics', 'Physics', 'Chemistry', 'Computer Science']
+          : null;
+      if (!activeSubjects) return { error: `Combination must identify PCMC or PCMB (received: ${combination || 'empty'})` };
+
       const marks = {};
+      let invalidMark = null;
       Object.entries(row).forEach(([key, value]) => {
         const normalizedKey = normalizeKey(key);
         if (nonSubjectKeys.has(normalizedKey)) return;
@@ -152,15 +177,18 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
         if (Number.isNaN(mark)) return;
 
         const displayName = subjectKeyMap[normalizedKey] || titleCase(key);
+        if (!activeSubjects.includes(displayName)) return;
         marks[displayName] = mark;
+        if (subjectMaxMarks[displayName] !== undefined && (mark < 0 || mark > subjectMaxMarks[displayName])) {
+          invalidMark = `${displayName} must be between 0 and ${subjectMaxMarks[displayName]} for a ${examType} exam`;
+        }
       });
 
+      if (invalidMark) return { error: invalidMark };
       if (Object.keys(marks).length === 0) return null;
 
-      const totalMarks = Object.values(marks).reduce((sum, value) => sum + value, 0);
-      const subjectCount = Object.keys(marks).length;
-      const maxMarks = parseInt(row['MaxMarks'] || row['max_marks'], 10) || (subjectCount * 100);
-      const percentage = maxMarks ? parseFloat(((totalMarks / maxMarks) * 100).toFixed(2)) : 0;
+      const totalMarks = activeSubjects.reduce((sum, subject) => sum + (marks[subject] ?? 0), 0);
+      const percentage = parseFloat(((totalMarks / totalMaxMarks) * 100).toFixed(2));
 
       return {
         rollNo,
@@ -170,9 +198,15 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
         combination,
         marks,
         totalMarks,
+        totalMaxMarks,
+        examType,
         percentage
       };
-    }).filter(Boolean).filter((item) => item.stream === 'Science');
+    }).filter(Boolean);
+
+    const invalidRow = parsedRows.find((item) => item.error);
+    if (invalidRow) return res.status(400).json({ error: invalidRow.error });
+    parsedRows = parsedRows.filter((item) => item.stream === 'Science');
 
     if (parsedRows.length === 0) {
       return res.status(400).json({
@@ -206,14 +240,14 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
     let hasResultsYearRankColumn = false;
 
     try {
-      const { error: yearRankError } = await supabase.from('results').select('year_rank').limit(1);
+      const { error: yearRankError } = await supabaseAdmin.from('results').select('year_rank').limit(1);
       if (!yearRankError) hasResultsYearRankColumn = true;
     } catch (e) {
       hasResultsYearRankColumn = false;
     }
 
     for (const item of parsedRows) {
-      await supabase.from('students').upsert({
+      const { error: studentUpsertError } = await supabaseAdmin.from('students').upsert({
         roll_no: item.rollNo,
         name: item.name,
         password: item.rollNo,
@@ -221,16 +255,20 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
         stream: item.stream,
         combination: item.combination
       }, { onConflict: 'roll_no' });
+      if (studentUpsertError) return res.status(500).json({ error: studentUpsertError.message });
 
       const resultPayload = {
         roll_no: item.rollNo,
         physics: item.marks.Physics ?? null,
         chemistry: item.marks.Chemistry ?? null,
         mathematics: item.marks.Mathematics ?? null,
+        biology: item.marks.Biology ?? null,
         computer_science: item.marks['Computer Science'] ?? null,
         english: item.marks.English ?? null,
         kannada: item.marks.Kannada ?? null,
         total_marks: item.totalMarks,
+        total_max_marks: item.totalMaxMarks,
+        exam_type: item.examType,
         percentage: item.percentage
       };
 
@@ -238,7 +276,8 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
         resultPayload.year_rank = item.yearRank;
       }
 
-      await supabase.from('results').upsert(resultPayload, { onConflict: 'roll_no' });
+      const { error: resultUpsertError } = await supabaseAdmin.from('results').upsert(resultPayload, { onConflict: 'roll_no' });
+      if (resultUpsertError) return res.status(500).json({ error: resultUpsertError.message });
 
       successCount++;
     }
@@ -269,7 +308,11 @@ app.get('/api/admin/students', verifyAdmin, async (req, res) => {
 // Delete all Science students and their results so a replacement sheet can be uploaded
 app.delete('/api/admin/data', verifyAdmin, async (req, res) => {
   try {
-    const { data: students, error: studentsError } = await supabase
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'SUPABASE_SERVICE_ROLE_KEY is required for admin deletion' });
+    }
+
+    const { data: students, error: studentsError } = await supabaseAdmin
       .from('students')
       .select('roll_no')
       .eq('stream', 'Science');
@@ -281,14 +324,14 @@ app.delete('/api/admin/data', verifyAdmin, async (req, res) => {
       return res.json({ success: true, deletedStudents: 0, deletedResults: 0, message: 'No Science data to delete' });
     }
 
-    const { error: resultsError } = await supabase
+    const { error: resultsError } = await supabaseAdmin
       .from('results')
       .delete()
       .in('roll_no', rollNumbers);
 
     if (resultsError) return res.status(500).json({ error: resultsError.message });
 
-    const { error: deleteStudentsError } = await supabase
+    const { error: deleteStudentsError } = await supabaseAdmin
       .from('students')
       .delete()
       .eq('stream', 'Science');
@@ -383,6 +426,7 @@ app.get('/api/student/result/:roll_no', async (req, res) => {
       ['Physics', result.physics],
       ['Chemistry', result.chemistry],
       ['Mathematics', result.mathematics],
+      ['Biology', result.biology],
       ['Computer Science', result.computer_science],
       ['English', result.english],
       ['Kannada', result.kannada]
