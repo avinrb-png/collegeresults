@@ -107,8 +107,8 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
 
     const totalMaxMarks = examType === 'yearly' ? 450 : 225;
     const subjectMaxMarks = examType === 'yearly'
-      ? { English: 80, Kannada: 80, Mathematics: 80, Physics: 70, Chemistry: 70, 'Computer Science': 70, Biology: 70 }
-      : { English: 40, Kannada: 40, Mathematics: 40, Physics: 35, Chemistry: 35, 'Computer Science': 35, Biology: 35 };
+      ? { English: 80, Hindi: 80, Kannada: 80, Mathematics: 80, Physics: 70, Chemistry: 70, 'Computer Science': 70, Biology: 70 }
+      : { English: 40, Hindi: 40, Kannada: 40, Mathematics: 40, Physics: 35, Chemistry: 35, 'Computer Science': 35, Biology: 35 };
 
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
@@ -125,7 +125,7 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
     const subjectKeyMap = {
       physics: 'Physics', chemistry: 'Chemistry', math: 'Mathematics', maths: 'Mathematics', mathematics: 'Mathematics',
       biology: 'Biology', computer: 'Computer Science', computerscience: 'Computer Science',
-      english: 'English', kannada: 'Kannada'
+      english: 'English', hindi: 'Hindi', kannada: 'Kannada'
     };
 
     function normalizeKey(key) {
@@ -158,11 +158,23 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
 
       if (!rollNo || !name) return null;
 
+      const hindiValue = getRowValue(row, ['Hindi']);
+      const kannadaValue = getRowValue(row, ['Kannada']);
+      const hasHindiMark = hindiValue !== undefined && hindiValue !== null && hindiValue !== '';
+      const hasKannadaMark = kannadaValue !== undefined && kannadaValue !== null && kannadaValue !== '';
+      if (hasHindiMark && hasKannadaMark) {
+        return { error: `Student ${rollNo} cannot have both Hindi and Kannada marks in the same result` };
+      }
+      const headerKeys = Object.keys(row).map(normalizeKey);
+      const hasHindiHeader = headerKeys.includes('hindi');
+      const hasKannadaHeader = headerKeys.includes('kannada');
+      const languageSubject = hasHindiMark || (hasHindiHeader && !hasKannadaHeader) ? 'Hindi' : 'Kannada';
+
       const normalizedCombination = combination.toUpperCase().replace(/[^A-Z]/g, '');
       const activeSubjects = normalizedCombination.includes('PCMB') || normalizedCombination.includes('BIOLOGY')
-        ? ['Kannada', 'English', 'Mathematics', 'Physics', 'Chemistry', 'Biology']
+        ? [languageSubject, 'English', 'Mathematics', 'Physics', 'Chemistry', 'Biology']
         : normalizedCombination.includes('PCMC') || normalizedCombination.includes('COMPUTER')
-          ? ['Kannada', 'English', 'Mathematics', 'Physics', 'Chemistry', 'Computer Science']
+          ? [languageSubject, 'English', 'Mathematics', 'Physics', 'Chemistry', 'Computer Science']
           : null;
       if (!activeSubjects) return { error: `Combination must identify PCMC or PCMB (received: ${combination || 'empty'})` };
 
@@ -210,7 +222,7 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
 
     if (parsedRows.length === 0) {
       return res.status(400).json({
-        error: 'No valid students found. Use the required headers: Roll No, Name, Combination, Physics, Chemistry, Mathematics, Computer Science, English, Kannada.'
+        error: 'No valid students found. Use the required headers: Roll No, Name, Combination, Physics, Chemistry, Mathematics, Computer Science or Biology, English, and either Hindi or Kannada.'
       });
     }
 
@@ -265,6 +277,7 @@ app.post('/api/upload-excel', verifyAdmin, upload.single('file'), async (req, re
         biology: item.marks.Biology ?? null,
         computer_science: item.marks['Computer Science'] ?? null,
         english: item.marks.English ?? null,
+        hindi: item.marks.Hindi ?? null,
         kannada: item.marks.Kannada ?? null,
         total_marks: item.totalMarks,
         total_max_marks: item.totalMaxMarks,
@@ -429,6 +442,7 @@ app.get('/api/student/result/:roll_no', async (req, res) => {
       ['Biology', result.biology],
       ['Computer Science', result.computer_science],
       ['English', result.english],
+      ['Hindi', result.hindi],
       ['Kannada', result.kannada]
     ];
 

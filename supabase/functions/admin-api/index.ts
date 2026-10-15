@@ -99,6 +99,10 @@ Deno.serve(async (req: Request) => {
       };
       const classGrade = batchLabels[String(formData.get("batch") || "").trim()];
       if (!classGrade) return json({ error: "Please select a valid PUC batch" }, 400);
+      const examType = String(formData.get("exam_type") || "monthly").trim().toLowerCase();
+      if (examType !== "monthly" && examType !== "yearly") {
+        return json({ error: "Please select a valid exam type" }, 400);
+      }
       if (!file || !(file instanceof File)) {
         return json({ error: "No file uploaded" }, 400);
       }
@@ -113,14 +117,14 @@ Deno.serve(async (req: Request) => {
 
       const nonSubjectKeys = new Set([
         "rollno", "rollnumber", "name", "studentname", "class", "classgrade", "stream", "combination",
-        "totalmarks", "maxmarks", "percentage", "collegerank", "streamrank",
+        "totalmarks", "maxmarks", "totalmaxmarks", "examtype", "percentage", "collegerank", "streamrank",
       ]);
 
       const subjectKeyMap: Record<string, string> = {
         physics: "Physics", chemistry: "Chemistry", math: "Mathematics",
         "maths": "Mathematics", mathematics: "Mathematics", biology: "Biology",
         computer: "Computer Science", computerscience: "Computer Science",
-        english: "English", kannada: "Kannada",
+        english: "English", hindi: "Hindi", kannada: "Kannada",
       };
 
       function normalizeKey(key: string): string {
@@ -145,7 +149,32 @@ Deno.serve(async (req: Request) => {
         const combination = String(getRowValue(row, ["Combination", "combination", "comb"]) || "").trim();
         if (!rollNo || !name) return null;
 
+        const hindiValue = getRowValue(row, ["Hindi"]);
+        const kannadaValue = getRowValue(row, ["Kannada"]);
+        const hasHindiMark = hindiValue !== undefined && hindiValue !== null && hindiValue !== "";
+        const hasKannadaMark = kannadaValue !== undefined && kannadaValue !== null && kannadaValue !== "";
+        if (hasHindiMark && hasKannadaMark) {
+          return { error: `Student ${rollNo} cannot have both Hindi and Kannada marks in the same result` };
+        }
+        const headerKeys = Object.keys(row).map(normalizeKey);
+        const hasHindiHeader = headerKeys.includes("hindi");
+        const hasKannadaHeader = headerKeys.includes("kannada");
+        const languageSubject = hasHindiMark || (hasHindiHeader && !hasKannadaHeader) ? "Hindi" : "Kannada";
+        const normalizedCombination = combination.toUpperCase().replace(/[^A-Z]/g, "");
+        const activeSubjects = normalizedCombination.includes("PCMB") || normalizedCombination.includes("BIOLOGY")
+          ? [languageSubject, "English", "Mathematics", "Physics", "Chemistry", "Biology"]
+          : normalizedCombination.includes("PCMC") || normalizedCombination.includes("COMPUTER")
+            ? [languageSubject, "English", "Mathematics", "Physics", "Chemistry", "Computer Science"]
+            : null;
+        if (!activeSubjects) {
+          return { error: `Combination must identify PCMC or PCMB (received: ${combination || "empty"})` };
+        }
+
+        const subjectMaxMarks: Record<string, number> = examType === "yearly"
+          ? { English: 80, Hindi: 80, Kannada: 80, Mathematics: 80, Physics: 70, Chemistry: 70, "Computer Science": 70, Biology: 70 }
+          : { English: 40, Hindi: 40, Kannada: 40, Mathematics: 40, Physics: 35, Chemistry: 35, "Computer Science": 35, Biology: 35 };
         const marks: Record<string, number> = {};
+        let invalidMark: string | null = null;
         Object.entries(row).forEach(([key, value]) => {
           const nk = normalizeKey(key);
           if (nonSubjectKeys.has(nk)) return;
@@ -153,34 +182,41 @@ Deno.serve(async (req: Request) => {
           const mark = parseInt(String(value), 10);
           if (Number.isNaN(mark)) return;
           const displayName = subjectKeyMap[nk] || titleCase(key);
+          if (!activeSubjects.includes(displayName)) return;
           marks[displayName] = mark;
+          if (mark < 0 || mark > subjectMaxMarks[displayName]) {
+            invalidMark = `${displayName} must be between 0 and ${subjectMaxMarks[displayName]} for a ${examType} exam`;
+          }
         });
 
+        if (invalidMark) return { error: invalidMark };
         if (Object.keys(marks).length === 0) return null;
 
-        const totalMarks = Object.values(marks).reduce((sum, v) => sum + v, 0);
-        const subjectCount = Object.keys(marks).length;
-        const maxMarks = parseInt(String(row["MaxMarks"] || row["max_marks"] || ""), 10) || subjectCount * 100;
-        const percentage = maxMarks ? parseFloat(((totalMarks / maxMarks) * 100).toFixed(2)) : 0;
+        const totalMarks = activeSubjects.reduce((sum, subject) => sum + (marks[subject] ?? 0), 0);
+        const totalMaxMarks = examType === "yearly" ? 450 : 225;
+        const percentage = parseFloat(((totalMarks / totalMaxMarks) * 100).toFixed(2));
 
-        return { rollNo, name, classGrade, combination, marks, totalMarks, percentage };
+        return { rollNo, name, classGrade, combination, marks, totalMarks, totalMaxMarks, examType, percentage };
       }).filter(Boolean) as Array<{
-        rollNo: string; name: string; classGrade: string; combination: string;
-        marks: Record<string, number>; totalMarks: number; percentage: number;
+        rollNo: string; name: string; classGrade: string; combination: string; error?: string;
+        marks: Record<string, number>; totalMarks: number; totalMaxMarks: number; examType: string; percentage: number;
       }>;
 
+      const invalidRow = parsedRows.find((item) => item.error);
+      if (invalidRow) return json({ error: invalidRow.error }, 400);
       if (parsedRows.length === 0) {
-        return json({ error: "No valid students found. Use the required headers: Roll No, Name, Combination, Physics, Chemistry, Mathematics, Computer Science, English, Kannada." }, 400);
+        return json({ error: "No valid students found. Use the required headers: Roll No, Name, Combination, Physics, Chemistry, Mathematics, Computer Science or Biology, English, and either Hindi or Kannada." }, 400);
       }
 
       let successCount = 0;
       for (const item of parsedRows) {
-        await supabase.from("students").upsert({
+        const { error: studentError } = await supabase.from("students").upsert({
           roll_no: item.rollNo, name: item.name, password: item.rollNo,
           class_grade: classGrade, stream: "Science", combination: item.combination,
         }, { onConflict: "roll_no" });
+        if (studentError) return json({ error: studentError.message }, 500);
 
-        await supabase.from("results").upsert({
+        const { error: resultError } = await supabase.from("results").upsert({
           roll_no: item.rollNo,
           physics: item.marks.Physics ?? null,
           chemistry: item.marks.Chemistry ?? null,
@@ -188,10 +224,14 @@ Deno.serve(async (req: Request) => {
           biology: item.marks.Biology ?? null,
           computer_science: item.marks["Computer Science"] ?? null,
           english: item.marks.English ?? null,
+          hindi: item.marks.Hindi ?? null,
           kannada: item.marks.Kannada ?? null,
+          exam_type: item.examType,
+          total_max_marks: item.totalMaxMarks,
           total_marks: item.totalMarks,
           percentage: item.percentage,
         }, { onConflict: "roll_no" });
+        if (resultError) return json({ error: resultError.message }, 500);
 
         successCount++;
       }
